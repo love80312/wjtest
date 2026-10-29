@@ -63,10 +63,10 @@ static wstring QuoteArg(const wstring& arg)
         {
             ++slashes;
         }
-        else if (ch == L'"')
+        else if (ch == L'\"')
         {
             out.append(slashes * 2 + 1, L'\\');
-            out.push_back(L'"');
+            out.push_back(L'\"');
             slashes = 0;
         }
         else
@@ -77,7 +77,7 @@ static wstring QuoteArg(const wstring& arg)
         }
     }
     out.append(slashes * 2, L'\\');
-    out.push_back(L'"');
+    out.push_back(L'\"');
     return out;
 }
 
@@ -100,7 +100,7 @@ static bool GetWinMergeDirectory(wstring& directory)
 
 static bool CopySourceToDestination(const wchar_t* source, const wchar_t* destination)
 {
-    // WinMerge supplies a temporary destination path. Do not overwrite if it exists.
+    // CopyFileW's third argument is FALSE, so an existing destination is overwritten.
     return CopyFileW(source, destination, FALSE) != FALSE;
 }
 

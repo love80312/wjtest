@@ -1,31 +1,169 @@
 
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Run Python formatter tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) {
+            throw "Python formatter tests failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Locate Visual Studio 2022
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe was not found."
+          }
+
+          $vsPath = & $vswhere `
+            -latest `
+            -products '*' `
+            -version '[17.0,18.0)' `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
+          if ($LASTEXITCODE -ne 0 -or -not $vsPath) {
+            throw "Visual Studio 2022 with the x64 C++ toolset was not found."
+          }
+
+          Write-Host "Visual Studio path: $vsPath"
+          Add-Content -Path $env:GITHUB_ENV -Value "VS_PATH=$vsPath"
+
       - name: Install ATL for v143
         shell: pwsh
         run: |
           $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $atlRoot = Join-Path $env:VS_PATH "VC\Tools\MSVC"
 
           if (-not (Test-Path $installer)) {
             throw "Visual Studio Installer setup.exe was not found."
           }
 
-          $arguments = @(
-            "modify"
-            "--installPath"
-            "`"$env:VS_PATH`""
-            "--add"
-            "Microsoft.VisualStudio.Component.VC.ATL"
-            "--quiet"
-            "--norestart"
-          )
+          $header = Get-ChildItem `
+            -Path $atlRoot `
+            -Filter atlbase.h `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.FullName -match '\\atlmfc\\include\\atlbase\.h$'
+            } |
+            Select-Object -First 1
 
-          $process = Start-Process `
-            -FilePath $installer `
-            -ArgumentList $arguments `
-            -Wait `
-            -PassThru
-
-          Write-Host "ATL installer exit code: $($process.ExitCode)"
-
-          if ($process.ExitCode -ne 0) {
-            throw "ATL installation failed with exit code $($process.ExitCode)"
+          if ($header) {
+            Write-Host "ATL is already installed: $($header.FullName)"
           }
+          else {
+            $argumentLine = 'modify --installPath "' +
+              $env:VS_PATH +
+              '" --add Microsoft.VisualStudio.Component.VC.ATL --quiet --norestart'
+
+            Write-Host "Installing Microsoft.VisualStudio.Component.VC.ATL"
+
+            $installerProcess = Start-Process `
+              -FilePath $installer `
+              -ArgumentList $argumentLine `
+              -WorkingDirectory $env:TEMP `
+              -Wait `
+              -PassThru
+
+            Write-Host "ATL installer exit code: $($installerProcess.ExitCode)"
+
+            if ($installerProcess.ExitCode -notin @(0, 3010)) {
+              throw "ATL installation failed with exit code $($installerProcess.ExitCode)"
+            }
+
+            $header = Get-ChildItem `
+              -Path $atlRoot `
+              -Filter atlbase.h `
+              -Recurse `
+              -File `
+              -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.FullName -match '\\atlmfc\\include\\atlbase\.h$'
+              } |
+              Select-Object -First 1
+
+            if (-not $header) {
+              throw "ATL installation finished, but atlbase.h was not found."
+            }
+
+            Write-Host "ATL header found: $($header.FullName)"
+          }
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v3
+        with:
+          vs-version: '[17.0,18.0)'
+          msbuild-architecture: x64
+
+      - name: Build x64 COM DLL
+        shell: pwsh
+        run: |
+          msbuild src/RPGJsonBeautifier.vcxproj /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSBuild failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Assemble WinMerge plugin
+        shell: pwsh
+        run: |
+          $buildDir = "src/Build/x64/Release/MergePlugins"
+          $packageDir = "dist/MergePlugins"
+          $dll = Join-Path $buildDir "RPGJsonBeautifier.dll"
+          $tlb = Join-Path $buildDir "DisplayJSONFiles.tlb"
+          $pythonScript = "src/RPGJsonBeautifier.py"
+
+          if (-not (Test-Path $dll)) {
+            throw "Built DLL was not found: $dll"
+          }
+
+          if (-not (Test-Path $pythonScript)) {
+            throw "Python formatter was not found: $pythonScript"
+          }
+
+          New-Item -ItemType Directory -Path $packageDir -Force |
+            Out-Null
+
+          Copy-Item -LiteralPath $dll -Destination $packageDir -Force
+          Copy-Item -LiteralPath $pythonScript -Destination $packageDir -Force
+
+          if (Test-Path $tlb) {
+            Copy-Item -LiteralPath $tlb -Destination $packageDir -Force
+          }
+
+          Write-Host "Packaged plugin files:"
+          Get-ChildItem -Path $packageDir |
+            Select-Object Name, Length
+
+      - name: Upload WinMerge plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: RPGJsonBeautifier-WinMerge-x64
+          path: dist/MergePlugins/
+          if-no-files-found: error

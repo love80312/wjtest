@@ -1,0 +1,42 @@
+// DisplayJSONFiles.idl - RPGJsonBeautifier plugin type library
+import "oaidl.idl";
+import "ocidl.idl";
+
+[
+    object,
+    uuid(17E9C8B1-BA42-49A8-AB3E-31D06BCE67D1),
+    dual,
+    helpstring("RPGJsonBeautifier WinMerge plugin interface"),
+    pointer_default(unique)
+]
+interface IWinMergeScript : IDispatch
+{
+    [propget, id(1)] HRESULT PluginEvent([out, retval] BSTR *pVal);
+    [propget, id(2)] HRESULT PluginDescription([out, retval] BSTR *pVal);
+    [propget, id(3)] HRESULT PluginFileFilters([out, retval] BSTR *pVal);
+    [propget, id(4)] HRESULT PluginIsAutomatic([out, retval] VARIANT_BOOL *pVal);
+    [id(5)] HRESULT UnpackBufferA([in] SAFEARRAY(unsigned char) *pBuffer, [in] INT *pSize, [in] VARIANT_BOOL *pbChanged, [in] INT *pSubcode, [out, retval] VARIANT_BOOL *pbSuccess);
+    [id(6)] HRESULT PackBufferA([in] SAFEARRAY(unsigned char) *pBuffer, [in] INT *pSize, [in] VARIANT_BOOL *pbChanged, [in] INT subcode, [out, retval] VARIANT_BOOL *pbSuccess);
+    [id(7)] HRESULT UnpackFile([in] BSTR fileSrc, [in] BSTR fileDst, VARIANT_BOOL *pbChanged, INT *pSubcode, [out, retval] VARIANT_BOOL *pbSuccess);
+    [id(8)] HRESULT PackFile([in] BSTR fileSrc, [in] BSTR fileDst, VARIANT_BOOL *pbChanged, INT pSubcode, [out, retval] VARIANT_BOOL *pbSuccess);
+    [id(9)] HRESULT ShowSettingsDialog([out, retval] VARIANT_BOOL *pbHandled);
+};
+
+[
+    uuid(4B7F8E5A-0E37-4E26-BDC9-917C53C46A20),
+    version(1.0),
+    helpstring("RPGJsonBeautifier 1.0 Type Library")
+]
+library DisplayJSONFilesLib
+{
+    importlib("stdole32.tlb");
+    importlib("stdole2.tlb");
+    [
+        uuid(9C0C57D3-5A8C-4E65-92D9-5E1FEC85D6E4),
+        helpstring("RPGJsonBeautifier WinMerge class")
+    ]
+    coclass WinMergeScript
+    {
+        [default] interface IWinMergeScript;
+    };
+};

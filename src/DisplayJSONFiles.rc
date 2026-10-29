@@ -1,0 +1,7 @@
+#include "resource.h"
+#include <winres.h>
+1 TYPELIB "DisplayJSONFiles.tlb"
+STRINGTABLE
+BEGIN
+    IDS_PROJNAME "RPGJsonBeautifier"
+END

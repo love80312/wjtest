@@ -1,0 +1,7 @@
+; RPGJsonBeautifier.dll exports
+LIBRARY "RPGJsonBeautifier.dll"
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE
+    DllRegisterServer PRIVATE
+    DllUnregisterServer PRIVATE

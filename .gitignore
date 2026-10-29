@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.vs/
+out/
+build/
+dist/
+*.user
+*.suo

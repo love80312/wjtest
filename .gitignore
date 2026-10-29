@@ -1,8 +1,19 @@
+
+# Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
+
+# Visual Studio
 .vs/
-out/
-build/
-dist/
 *.user
 *.suo
+
+# C++ build output
+/src/Build/
+/src/BuildTmp/
+/build/
+/out/
+
+# Packaging output
+/dist/

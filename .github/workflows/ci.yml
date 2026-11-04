@@ -2,7 +2,7 @@
 name: CI
 
 on:
-
+  push:
   pull_request:
   workflow_dispatch:
 
@@ -10,8 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  test-and-build:
+  python-tests:
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.13']   # oldest supported version and the newest one
 
     steps:
       - name: Check out repository
@@ -20,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python-version }}
 
       - name: Run Python formatter tests
         shell: pwsh
@@ -29,6 +33,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Python formatter tests failed with exit code $LASTEXITCODE"
           }
+
+  build:
+    needs: python-tests
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Locate Visual Studio 2022
         shell: pwsh
@@ -138,6 +150,7 @@ jobs:
           $dll = Join-Path $buildDir "RPGJsonBeautifier.dll"
           $tlb = Join-Path $buildDir "DisplayJSONFiles.tlb"
           $pythonScript = "src/RPGJsonBeautifier.py"
+          $settingsFile = "src/RPGJsonBeautifier.ini"
 
           if (-not (Test-Path $dll)) {
             throw "Built DLL was not found: $dll"
@@ -147,11 +160,16 @@ jobs:
             throw "Python formatter was not found: $pythonScript"
           }
 
+          if (-not (Test-Path $settingsFile)) {
+            throw "Formatter settings file was not found: $settingsFile"
+          }
+
           New-Item -ItemType Directory -Path $packageDir -Force |
             Out-Null
 
           Copy-Item -LiteralPath $dll -Destination $packageDir -Force
           Copy-Item -LiteralPath $pythonScript -Destination $packageDir -Force
+          Copy-Item -LiteralPath $settingsFile -Destination $packageDir -Force
 
           if (Test-Path $tlb) {
             Copy-Item -LiteralPath $tlb -Destination $packageDir -Force

@@ -25,8 +25,11 @@ Close WinMerge and place the following files directly in WinMerge's `MergePlugin
 MergePlugins/
 ├── RPGJsonBeautifier.dll
 ├── RPGJsonBeautifier.py
+├── RPGJsonBeautifier.ini  # Layout settings (optional; defaults are used when it is missing)
 └── DisplayJSONFiles.tlb   # Optional; the type library is also embedded in the DLL
 ```
+
+When updating, keep your existing `RPGJsonBeautifier.ini` if you have changed it.
 
 Restart WinMerge. Enable **Plugins → Automatic Unpacking** to let WinMerge select the plugin for `.json` files automatically. For troubleshooting, select the plugin manually in the unpacker settings before opening the comparison.
 
@@ -38,23 +41,55 @@ py -3 --version
 
 ## Formatting rules
 
-- Uses two-space indentation for multiline objects and arrays.
-- Keeps arrays containing only numbers and `null` on one line.
-- Keeps arrays of short ASCII letters, digits, and underscore strings (1–9 characters) on one line.
-- Keeps objects whose values are all considered empty (`null`, `false`, numeric zero, `""`, empty arrays, or empty objects) on one line.
-- Keeps RPG Maker-style command objects on one line when a decoded `code` key exists and every property value is a scalar or an array of scalars.
-- Preserves object property order, duplicate keys, raw number spellings, and JSON string tokens.
-- Runs a token-level check to ensure only whitespace outside strings changes.
+The default layout is the same as the standalone *RPG JSON 美化工具* (`RPGgameJSON_8.html`), so text formatted by either tool is identical:
 
-These rules reflect the current implementation. Changes to them should be accompanied by regression tests because they affect WinMerge's comparison results.
+```json
+{"name":"Map001",
+	"data":[0,0,0,0,0],
+	"events":[null,
+		{"id":1,
+			"name":"EV001",
+			"list":[
+				{"code":101,"indent":0,"parameters":["","",0,2]},
+				{"code":401,"indent":0,"parameters":["哈囉"]}
+			]}]}
+```
+
+- Arrays containing only numbers and `null` stay on one line, with no spaces: `[0,0,0,0,0]`.
+- Arrays of short ASCII letters, digits, and underscore strings (1–9 characters) stay on one line.
+- Objects whose values are all considered empty (`null`, `false`, numeric zero, `""`, empty arrays, or empty objects) stay on one line.
+- RPG Maker-style command objects stay on one line when a decoded `code` key exists and every property value is a scalar or an array of scalars.
+- Consecutive empty-valued entries (`"a":"","b":null,"c":[]`) share one line (up to 100 columns).
+- A closing bracket that directly follows another one is merged (`}]}`), `{` joins its first entry, `[` joins a leading `null`, and a single wrapper around a numeric array (`[[1,0,0,150]]`) stays on one line.
+- Preserves object property order, duplicate keys, raw number spellings, and JSON string tokens.
+- Verifies the result before it is used: it must be the input with only whitespace between tokens changed (same tokens, nothing inserted, nothing split).
+
+### Settings
+
+Every layout switch is in `RPGJsonBeautifier.ini` (next to the script); a missing file or key uses the default shown below.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `tight` | `true` | No space after `,` and `:` → `"data":[0,0,0]`. `false` → `"data": [0, 0, 0]` |
+| `hug` | `true` | Merge consecutive closing brackets: `}]}` |
+| `tab` | `true` | Indent with Tab; `false` → two spaces |
+| `snug` | `true` | `{` joins its first entry; `[` joins a leading `null`; `[[1,2]]` stays on one line |
+| `merge_empty` | `true` | Consecutive empty-valued entries share a line |
+| `wrap` | `false` | Wrap very long numeric arrays at about 100 columns |
+
+The same switches exist as command-line flags for manual runs, for example `py -3 RPGJsonBeautifier.py in.json out.json --no-tight --no-tab`.
+
+These rules reflect the current implementation. Changes to them should be accompanied by regression tests because they affect WinMerge's comparison results. `tests/golden/` holds expected outputs that were produced by the HTML tool.
 
 ## Failure behavior and limitations
 
 - The plugin is compare-oriented. Its `PackFile` implementation does not provide a write-back/restore operation; do not treat the transformed comparison view as an editor for saving changes to the original JSON.
 - The formatter runs on temporary comparison files. It does not intentionally write the formatted output to the source JSON.
-- If Python cannot start, the script is missing, or the JSON is invalid, the native bridge falls back to copying the original content for comparison. A comparison window opening successfully does not by itself prove that formatting occurred.
+- If Python cannot start, the script is missing, the JSON is invalid, or formatting takes longer than 30 seconds, the native bridge falls back to copying the original content for comparison (a timed-out formatter is killed together with its child process). A comparison window opening successfully does not by itself prove that formatting occurred.
+- When the formatter itself rejects a file, the reason (with line and column) is appended to `%TEMP%\RPGJsonBeautifier.log`. Set the environment variable `RPGJSONBEAUTIFIER_LOG` to another path, or to an empty value to disable logging.
+- JSON nested deeper than 200 levels is rejected (RPG Maker data is far shallower).
 - The formatter currently reads UTF-8 (with or without BOM) and UTF-16 files with a BOM. Its output file is UTF-8 without BOM.
-- Python 3.10+ is required because the script uses modern type annotations and `Path.write_text(..., newline=...)`.
+- Python 3.10+ is required because the script uses modern type annotations and `Path.write_text(..., newline=...)`. Tests run on 3.10 and 3.13 in CI.
 
 ## Tests and build
 
@@ -64,7 +99,7 @@ Run the formatter tests:
 python -m unittest discover -s tests -v
 ```
 
-The GitHub Actions workflow runs these tests, builds the x64 COM DLL with MSBuild, and packages the DLL, Python script, and generated type library. CI build success does not replace a WinMerge runtime test.
+The GitHub Actions workflow runs these tests on Python 3.10 and 3.13, then builds the x64 COM DLL with MSBuild, and packages the DLL, Python script, and generated type library. CI build success does not replace a WinMerge runtime test.
 
 ## Authorship and code provenance
 

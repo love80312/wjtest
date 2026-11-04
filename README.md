@@ -41,7 +41,7 @@ py -3 --version
 
 ## Formatting rules
 
-The default layout is the same as the standalone *RPG JSON 美化工具* (`RPGgameJSON_8.html`), so text formatted by either tool is identical:
+The default layout is the same as the standalone *RPG JSON 美化工具* (`RPGgameJSON_9.html`), so text formatted by either tool is identical:
 
 ```json
 {"name":"Map001",
@@ -57,10 +57,11 @@ The default layout is the same as the standalone *RPG JSON 美化工具* (`RPGga
 
 - Arrays containing only numbers and `null` stay on one line, with no spaces: `[0,0,0,0,0]`.
 - Arrays of short ASCII letters, digits, and underscore strings (1–9 characters) stay on one line.
-- Objects whose values are all considered empty (`null`, `false`, numeric zero, `""`, empty arrays, or empty objects) stay on one line.
+- Objects whose values are all empty (`null`, `""`, `[]`, or `{}`) stay on one line. `0` and `false` are real values, not empty ones.
+- Short objects whose direct values are all scalars (`{"type":1,"weaponImageId":1}`, `{"name":"","pan":0,"pitch":100,"volume":90}`) stay on one line while they fit in 100 columns (CJK characters count as two columns).
 - RPG Maker-style command objects stay on one line when a decoded `code` key exists and every property value is a scalar or an array of scalars.
-- Consecutive empty-valued entries (`"a":"","b":null,"c":[]`) share one line (up to 100 columns).
-- A closing bracket that directly follows another one is merged (`}]}`), `{` joins its first entry, `[` joins a leading `null`, and a single wrapper around a numeric array (`[[1,0,0,150]]`) stays on one line.
+- Consecutive empty-valued entries (`"a":"","b":null,"c":[]`) share one line (up to 100 columns); adjacent empty strings in an array (`"","",`) share a line too.
+- A closing bracket that directly follows another one is merged (`}]}`), `{` joins its first entry, `[` joins a leading `null`, a single wrapper around a numeric array (`[[1,0,0,150]]`) stays on one line, and short boolean arrays (`[true,false]`) stay on one line.
 - Preserves object property order, duplicate keys, raw number spellings, and JSON string tokens.
 - Verifies the result before it is used: it must be the input with only whitespace between tokens changed (same tokens, nothing inserted, nothing split).
 
@@ -73,8 +74,8 @@ Every layout switch is in `RPGJsonBeautifier.ini` (next to the script); a missin
 | `tight` | `true` | No space after `,` and `:` → `"data":[0,0,0]`. `false` → `"data": [0, 0, 0]` |
 | `hug` | `true` | Merge consecutive closing brackets: `}]}` |
 | `tab` | `true` | Indent with Tab; `false` → two spaces |
-| `snug` | `true` | `{` joins its first entry; `[` joins a leading `null`; `[[1,2]]` stays on one line |
-| `merge_empty` | `true` | Consecutive empty-valued entries share a line |
+| `snug` | `true` | `{` joins its first entry; `[` joins a leading `null`; `[[1,2]]` and short `[true,false]` stay on one line |
+| `merge_empty` | `true` | Consecutive empty-valued entries, and adjacent `""` in arrays, share a line |
 | `wrap` | `false` | Wrap very long numeric arrays at about 100 columns |
 
 The same switches exist as command-line flags for manual runs, for example `py -3 RPGJsonBeautifier.py in.json out.json --no-tight --no-tab`.

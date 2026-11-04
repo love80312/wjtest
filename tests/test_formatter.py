@@ -76,7 +76,7 @@ class DefaultLayoutTests(FormatterTestCase):
         self.assertNotIn("[[1,0,0,150]]", beautify_text(source, Options(snug=False)))
 
     def test_snug_opening_brace_and_leading_null(self):
-        source = '[null,{"id":1,"name":"A","note":"x"}]'
+        source = '[null,{"id":1,"sub":{"k":1},"note":"x"}]'
         output = beautify_text(source)
 
         self.assertTrue(output.startswith("[null,\n"))
@@ -114,7 +114,7 @@ class DefaultLayoutTests(FormatterTestCase):
 
 
 class GoldenTests(FormatterTestCase):
-    """Expected files were produced by the HTML tool (RPGgameJSON_8.html) itself."""
+    """Expected files were produced by the HTML tool (RPGgameJSON_9.html) itself."""
 
     def check(self, name: str, suffix: str, options: Options) -> None:
         source = (GOLDEN / f"{name}.in.json").read_text(encoding="utf-8")
@@ -256,10 +256,46 @@ class ParserTests(FormatterTestCase):
         self.assert_preserves_json_tokens(source, output)
 
     def test_all_empty_values_object_is_inline(self):
-        source = '{"a":null,"b":false,"c":0,"d":"","e":[],"f":{}}'
+        source = '{"a":null,"d":"","e":[],"f":{}}'
 
-        self.assertIn('{"a": null, "b": false, "c": 0, "d": "", "e": [], "f": {}}', beautify_text(source, LEGACY))
-        self.assertIn('{"a":null,"b":false,"c":0,"d":"","e":[],"f":{}}', beautify_text(source))
+        self.assertIn('{"a": null, "d": "", "e": [], "f": {}}', beautify_text(source, LEGACY))
+        self.assertIn('{"a":null,"d":"","e":[],"f":{}}', beautify_text(source))
+
+    def test_zero_and_false_are_values_not_empty(self):
+        # Only null, "", [] and {} count as empty; 0 and false are real RPG Maker values.
+        output = beautify_text('{"a":0,"b":false,"c":[],"d":{}}')
+
+        self.assertGreater(output.strip().count("\n"), 0)
+        self.assertIn('"a":0,', output)
+
+    def test_short_scalar_object_stays_inline_until_it_is_too_wide(self):
+        short = '{"type":1,"weaponImageId":1}'
+        wide = '{"name":"' + "x" * 95 + '","a":1}'
+
+        self.assertEqual(beautify_text(short), short + "\n")
+        self.assertGreater(beautify_text(wide).strip().count("\n"), 0)
+        # CJK characters count as two columns, like the HTML tool
+        cjk = '{"name":"' + "哈" * 45 + '","a":1}'
+        self.assertGreater(beautify_text(cjk).strip().count("\n"), 0)
+        self.assertEqual(beautify_text('{"name":"' + "哈" * 40 + '","a":1}').strip().count("\n"), 0)
+
+    def test_short_boolean_array_is_inline_only_with_snug_and_when_it_fits(self):
+        source = '{"flags":[true,false,true]}'
+
+        self.assertIn('"flags":[true,false,true]', beautify_text(source))
+        self.assertNotIn('[true,false,true]', beautify_text(source, Options(snug=False)))
+        too_long = '{"flags":[' + ",".join(["true"] * 30) + ']}'
+        self.assertGreater(beautify_text(too_long).strip().count("\n"), 0)
+
+    def test_adjacent_empty_strings_in_arrays_share_a_line(self):
+        source = '{"names":["","","A b","",""]}'
+
+        merged = beautify_text(source)
+        self.assertIn('\t\t"","",\n', merged)
+        self.assertIn('\t\t"A b",\n', merged)
+        separate = beautify_text(source, Options(merge_empty=False))
+        self.assertEqual(separate.count('"",\n'), 3)
+        self.assertEqual(json.loads(merged), json.loads(separate))
 
     def test_nested_arrays_and_consecutive_nulls_remain_valid(self):
         source = '{"list":[{"x":1},[true,false],null,null,{"y":[2,3]}]}'

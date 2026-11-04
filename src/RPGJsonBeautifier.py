@@ -3,7 +3,7 @@
 """
 RPGJsonBeautifier - lossless RPG Maker MV/MZ JSON formatter for WinMerge.
 
-The layout follows the standalone "RPG JSON 美化工具" (RPGgameJSON_8.html):
+The layout follows the standalone "RPG JSON 美化工具" (RPGgameJSON_9.html):
 compact "tight" separators (``[0,0,0]``, ``"key":value``), Tab indentation,
 merged closing brackets (``}]}``), "snug" openings and merged empty entries.
 Every layout switch can be changed in ``RPGJsonBeautifier.ini`` (next to this
@@ -48,11 +48,11 @@ class Options:
     tight: bool = True        # no space after "," and ":"   ->  [0,0,0]  "k":v
     wrap: bool = False        # wrap very long numeric arrays at WRAP_WIDTH columns
     tab: bool = True          # indent with Tab instead of two spaces
-    snug: bool = True         # "{" joins its first entry; "[" joins a leading null; [[1,2]] stays on one line
-    merge_empty: bool = True  # consecutive empty-valued entries share a line
+    snug: bool = True         # "{" joins its first entry; "[" joins a leading null; [[1,2]] and [true,false] stay on one line
+    merge_empty: bool = True  # consecutive empty-valued entries (and adjacent "" in arrays) share a line
 
 
-# Layout of earlier versions of this plugin (two spaces, ", " and ": ").
+# Plain look: two spaces, ", " and ": " and every optional layout feature off (the rules that have no switch still apply).
 LEGACY = Options(hug=False, tight=False, wrap=False, tab=False, snug=False, merge_empty=False)
 
 WRAP_WIDTH = 100      # numeric-array wrap column
@@ -252,16 +252,16 @@ def parse_json(src: str) -> Node:
 
 
 # --------------------------------------------------------------------------
-# Layout (ported rule-for-rule from RPGgameJSON_8.html so both tools agree)
+# Layout (ported rule-for-rule from RPGgameJSON_9.html so both tools agree)
 # --------------------------------------------------------------------------
 
-_ZERO_NUM = re.compile(r"-?0(?:\.0+)?(?:[eE][+-]?[0-9]+)?\Z")
 _SHORT_ASCII = re.compile(r"[A-Za-z0-9_]{1,9}\Z")
 
 
 def _is_empty(node: Node) -> bool:
+    # 0 and false are valid RPG Maker values, not empty values.
     if type(node) is str:
-        return node in ("null", "false", '""') or (node[0] in "-0" and _ZERO_NUM.match(node) is not None)
+        return node == "null" or node == '""'
     if type(node) is Array:
         return not node.items
     return not node.entries
@@ -280,6 +280,11 @@ def _is_code_key(raw_key: str) -> bool:
 
 def _is_scalar_or_scalar_array(node: Node) -> bool:
     return type(node) is str or (type(node) is Array and node.scalars)
+
+
+def _fits(text: str, pad_w: int) -> bool:
+    # visual width >= len(text), so the cheap length test rules out long text (e.g. notes) early
+    return len(text) + pad_w <= COMPACT_WIDTH and _visual_width(text) + pad_w <= COMPACT_WIDTH
 
 
 class _Formatter:
@@ -360,16 +365,24 @@ class _Formatter:
         if node.scalars and all(map(_is_short_ascii, items)):
             return "[" + self.comma.join(items) + "]"
 
-        # Other arrays expand; consecutive nulls are grouped on one line.
+        # Short boolean arrays stay on one line when they fit.
+        if self.opts.snug and node.scalars and all(x == "true" or x == "false" for x in items):
+            one = "[" + self.comma.join(items) + "]"
+            if _fits(one, pad_w):
+                return one
+
+        # Other arrays expand; consecutive nulls (and, with merge_empty, empty strings) are grouped.
         pad1 = self._pad(indent + 1)
+        merge = self.opts.merge_empty
         parts: list[str] = []
         i, n = 0, len(items)
         while i < n:
-            if items[i] == "null":
-                j = i
-                while j < n and items[j] == "null":
+            raw = items[i]
+            if raw == "null" or (merge and raw == '""'):
+                j = i + 1
+                while j < n and items[j] == raw:
                     j += 1
-                parts.append(pad1 + self.comma.join(["null"] * (j - i)))
+                parts.append(pad1 + self.comma.join([raw] * (j - i)))
                 i = j
             else:
                 parts.append(pad1 + self._fmt(items[i], indent + 1))
@@ -398,6 +411,11 @@ class _Formatter:
         # RPG MV/MZ command objects: has a "code" key and every value is a scalar / scalar array.
         if any(_is_code_key(k) for k, _ in entries) and all(_is_scalar_or_scalar_array(v) for _, v in entries):
             return self._inline(node)
+        # Short objects whose direct values are all scalars stay on one line.
+        if all(type(v) is str for _, v in entries):
+            one = self._inline(node)
+            if _fits(one, indent * 2):
+                return one
         pad1 = self._pad(indent + 1)
         colon = self.colon
         parts = [pad1 + k + colon + self._fmt(v, indent + 1) for k, v in entries]

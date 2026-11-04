@@ -1,18 +1,8 @@
 {"autoplayBgm":false,
 	"autoplayBgs":false,
 	"battleback1Name":"","battleback2Name":"",
-	"bgm":{
-		"name":"",
-		"pan":0,
-		"pitch":100,
-		"volume":90
-	},
-	"bgs":{
-		"name":"",
-		"pan":0,
-		"pitch":100,
-		"volume":90
-	},
+	"bgm":{"name":"","pan":0,"pitch":100,"volume":90},
+	"bgs":{"name":"","pan":0,"pitch":100,"volume":90},
 	"disableDashing":false,
 	"displayName":"港口小鎮",
 	"encounterList":[],
@@ -47,13 +37,7 @@
 						"variableValue":0
 					},
 					"directionFix":false,
-					"image":{
-						"characterIndex":0,
-						"characterName":"People1",
-						"direction":2,
-						"pattern":0,
-						"tileId":0
-					},
+					"image":{"characterIndex":0,"characterName":"People1","direction":2,"pattern":0,"tileId":0},
 					"list":[
 						{"code":101,"indent":0,"parameters":["People1",0,0,2]},
 						{"code":401,"indent":0,"parameters":["歡迎來到港口小鎮！\\C[2]請小心海盜。"]},

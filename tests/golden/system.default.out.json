@@ -1,10 +1,5 @@
 {"airship":{
-		"bgm":{
-			"name":"Ship3",
-			"pan":0,
-			"pitch":100,
-			"volume":90
-		},
+		"bgm":{"name":"Ship3","pan":0,"pitch":100,"volume":90},
 		"characterIndex":3,
 		"characterName":"Vehicle",
 		"startMapId":0,
@@ -18,9 +13,8 @@
 	],
 	"attackMotions":[
 		{"type":0,"weaponImageId":0},
-		{"type":1,
-			"weaponImageId":1
-		}],
+		{"type":1,"weaponImageId":1}
+	],
 	"currencyUnit":"G",
 	"gameTitle":"測試遊戲",
 	"partyMembers":[1,2],
@@ -49,12 +43,7 @@
 			"level":1
 		}],
 	"title1Name":"","title2Name":"",
-	"titleBgm":{
-		"name":"",
-		"pan":0,
-		"pitch":100,
-		"volume":90
-	},
+	"titleBgm":{"name":"","pan":0,"pitch":100,"volume":90},
 	"windowTone":[0,0,0,0],
 	"versionId":123456,
 	"weaponTypes":[

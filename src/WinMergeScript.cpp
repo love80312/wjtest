@@ -104,6 +104,10 @@ static bool CopySourceToDestination(const wchar_t* source, const wchar_t* destin
     return CopyFileW(source, destination, FALSE) != FALSE;
 }
 
+// A formatter that has not finished after this long is killed so WinMerge's UI never hangs;
+// the caller then falls back to comparing the original file.
+static const DWORD kFormatterTimeoutMs = 30000;
+
 static bool RunFormatter(const wstring& source, const wstring& destination)
 {
     wstring winMergeDir;
@@ -127,28 +131,65 @@ static bool RunFormatter(const wstring& source, const wstring& destination)
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
+    // `py.exe` starts python.exe as a child process. Put both in a job object that is killed
+    // when the job handle closes, so a timeout never leaves an orphaned python.exe behind.
+    // (Best effort: if the job cannot be set up, the launcher alone is terminated on timeout.)
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job)
+    {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+        {
+            CloseHandle(job);
+            job = nullptr;
+        }
+    }
+
     const BOOL created = CreateProcessW(
         nullptr,
         mutableCommand.data(),
         nullptr,
         nullptr,
         FALSE,
-        CREATE_NO_WINDOW,
+        CREATE_NO_WINDOW | CREATE_SUSPENDED,
         nullptr,
         winMergeDir.c_str(),
         &startup,
         &process);
 
     if (!created)
+    {
+        if (job)
+            CloseHandle(job);
         return false;
+    }
 
-    const DWORD waitResult = WaitForSingleObject(process.hProcess, INFINITE);
-    DWORD exitCode = 1;
-    const BOOL gotExitCode = GetExitCodeProcess(process.hProcess, &exitCode);
+    if (job)
+        AssignProcessToJobObject(job, process.hProcess);   // must happen before the process runs
+    ResumeThread(process.hThread);
+
+    const DWORD waitResult = WaitForSingleObject(process.hProcess, kFormatterTimeoutMs);
+    bool ok = false;
+    if (waitResult == WAIT_OBJECT_0)
+    {
+        DWORD exitCode = 1;
+        ok = GetExitCodeProcess(process.hProcess, &exitCode) && exitCode == 0;
+    }
+    else if (waitResult == WAIT_TIMEOUT)
+    {
+        if (job)
+            TerminateJobObject(job, 1);
+        else
+            TerminateProcess(process.hProcess, 1);
+    }
+
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
+    if (job)
+        CloseHandle(job);   // KILL_ON_JOB_CLOSE also cleans up anything that is still running
 
-    return waitResult == WAIT_OBJECT_0 && gotExitCode && exitCode == 0;
+    return ok;
 }
 
 STDMETHODIMP CWinMergeScript::UnpackFile(BSTR fileSrc, BSTR fileDst,

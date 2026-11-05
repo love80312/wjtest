@@ -1,5 +1,7 @@
 # RPGJsonBeautifier
 
+## by AI
+
 A WinMerge unpacker plugin that formats RPG Maker MV/MZ JSON for comparison. The formatter changes whitespace only; it does not intentionally rewrite JSON values or modify the original files.
 
 ## Current verification status

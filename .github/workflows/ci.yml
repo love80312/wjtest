@@ -19,10 +19,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -40,7 +40,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
 
       - name: Locate Visual Studio 2022
         shell: pwsh
@@ -179,8 +184,22 @@ jobs:
           Get-ChildItem -Path $packageDir |
             Select-Object Name, Length
 
+      - name: Smoke-test packaged formatter
+        shell: python
+        run: |
+          # Runs the packaged script (next to its .ini) and compares with the HTML-tool golden output.
+          import os, subprocess, sys
+          out = os.path.join(os.environ["RUNNER_TEMP"], "map.formatted.json")
+          subprocess.run([sys.executable, "dist/MergePlugins/RPGJsonBeautifier.py", "tests/golden/map.in.json", out], check=True)
+          def read(path):
+              with open(path, "rb") as fh:
+                  return fh.read().replace(b"\r\n", b"\n")
+          if read(out) != read("tests/golden/map.default.out.json"):
+              sys.exit("Packaged formatter output differs from tests/golden/map.default.out.json")
+          print("Packaged formatter output matches the golden file")
+
       - name: Upload WinMerge plugin
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: RPGJsonBeautifier-WinMerge-x64
           path: dist/MergePlugins/

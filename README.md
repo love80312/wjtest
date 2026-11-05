@@ -63,7 +63,7 @@ The default layout is the same as the standalone *RPG JSON 美化工具* (`RPGga
 - Consecutive empty-valued entries (`"a":"","b":null,"c":[]`) share one line (up to 100 columns); adjacent empty strings in an array (`"","",`) share a line too.
 - A closing bracket that directly follows another one is merged (`}]}`), `{` joins its first entry, `[` joins a leading `null`, a single wrapper around a numeric array (`[[1,0,0,150]]`) stays on one line, and short boolean arrays (`[true,false]`) stay on one line.
 - Preserves object property order, duplicate keys, raw number spellings, and JSON string tokens.
-- Verifies the result before it is used: it must be the input with only whitespace between tokens changed (same tokens, nothing inserted, nothing split).
+- Verifies the result before it is used: it must be the input with only whitespace between tokens changed (same characters in the same order once whitespace is removed, valid JSON, and every string identical including the whitespace inside it).
 
 ### Settings
 
@@ -90,7 +90,22 @@ These rules reflect the current implementation. Changes to them should be accomp
 - When the formatter itself rejects a file, the reason (with line and column) is appended to `%TEMP%\RPGJsonBeautifier.log`. Set the environment variable `RPGJSONBEAUTIFIER_LOG` to another path, or to an empty value to disable logging.
 - JSON nested deeper than 200 levels is rejected (RPG Maker data is far shallower).
 - The formatter currently reads UTF-8 (with or without BOM) and UTF-16 files with a BOM. Its output file is UTF-8 without BOM.
-- Python 3.10+ is required because the script uses modern type annotations and `Path.write_text(..., newline=...)`. Tests run on 3.10 and 3.13 in CI.
+- Python 3.10+ is required because the script uses `X | Y` type unions at run time. Tests run on 3.10 and 3.13 in CI.
+
+## Performance
+
+WinMerge starts the script once per compared file, so both the fixed start-up cost and the per-megabyte cost matter. Measured on a Linux development machine (whole process, including interpreter start; your Windows machine will be slower, the ratios are what counts):
+
+| Input | Before | After |
+| --- | --- | --- |
+| 8 KB (Actors-like) | 63 ms | 30 ms |
+| 0.5 MB (map with events) | 209 ms | 83 ms |
+| 4.7 MB (event-heavy) | 1.8 s | 1.1 s |
+
+What makes the difference:
+- Only `json`, `os`, `re`, `sys` and `collections` are imported at start-up (a test guards this); `argparse`, `dataclasses`, `pathlib`, `tempfile` and `configparser` cost about 25 ms together.
+- Numeric arrays and "flat" objects (event commands, actors, items) are parsed with one regular-expression match each instead of one match per token. A test checks that the result is identical to the token-by-token parser, including which documents are rejected.
+- The integrity check removes whitespace with `str.replace` and uses the C JSON scanner instead of four regular-expression passes.
 
 ## Tests and build
 

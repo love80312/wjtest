@@ -3,6 +3,8 @@ import io
 import json
 import os
 import random
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,7 +13,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import RPGJsonBeautifier  # noqa: E402
 from RPGJsonBeautifier import (  # noqa: E402
+    Array,
+    Obj,
     LEGACY,
     JsonFormatError,
     Options,
@@ -20,11 +25,15 @@ from RPGJsonBeautifier import (  # noqa: E402
     main,
     parse_json,
     read_text,
-    strip_json_whitespace,
     verify_lossless,
 )
 
 GOLDEN = Path(__file__).resolve().parent / "golden"
+
+
+def strip_json_whitespace(text: str) -> str:
+    """Remove insignificant JSON whitespace (outside strings); a reference for the tests only."""
+    return "".join(re.findall(r'"[^"\\]*(?:\\.[^"\\]*)*"|[^ \t\r\n"]+', text))
 
 
 class FormatterTestCase(unittest.TestCase):
@@ -340,6 +349,71 @@ class ParserTests(FormatterTestCase):
                 self.assertEqual(json.loads(output), json.loads(source))
 
 
+def _shape(node):
+    """Comparable form of a parse tree, including the flags the formatter relies on."""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, Array):
+        return ("A", tuple(_shape(x) for x in node.items), node.scalars, node.numeric)
+    return ("O", tuple((k, _shape(v)) for k, v in node.entries),
+            node.all_empty, node.has_code, node.flat, node.all_scalar)
+
+
+class FastPathTests(unittest.TestCase):
+    """The regex fast paths (numeric arrays, flat objects) must build exactly the same tree as the token loop."""
+
+    def trees(self, text):
+        def attempt():
+            try:
+                return _shape(parse_json(text))
+            except JsonFormatError:
+                return "rejected"
+        fast = attempt()
+        with mock.patch.object(RPGJsonBeautifier, "_flat_object", lambda *args: None), \
+                mock.patch.object(RPGJsonBeautifier, "_flat_numbers", lambda *args: None):
+            slow = attempt()
+        return fast, slow
+
+    def test_valid_and_invalid_documents_agree(self):
+        documents = (
+            '{"code":401,"indent":0,"parameters":["a]b","}","\\",\\"x"]}',
+            '{ }', '{\n"a" : 1 ,\n"b" :[ 1 , 2 ]\n}', '{"a":-0,"b":1E+5,"c":0.50,"d":true,"e":null}',
+            '{"a":{"b":1}}', '{"a":[[1]]}', '{"a":[{}]}', '[{"a":1},{"b":[true,false]}]', '{"\\u0063ode":1,"p":[2]}',
+            '{"code":1,"p":[' + ",".join(["1"] * 64) + ']}',     # 64 items: still on the fast path
+            '{"code":1,"p":[' + ",".join(["1"] * 65) + ']}',     # 65 items: falls back to the token loop
+            '{"code":1,"p":[' + ",".join(['"s"'] * 65) + ']}',
+            '{' + ','.join('"k%d":%d' % (i, i) for i in range(256)) + '}',          # 256 entries: fast path
+            '{' + ','.join('"k%d":%d' % (i, i) for i in range(257)) + '}',          # 257 entries: token loop
+            '{' + ','.join('"k%d":%d' % (i, i) for i in range(300)) + ',"tail":{"x":1}}',
+            # invalid: all must be rejected the same way by both paths
+            '{"a":1,}', '{"a":1 "b":2}', '{"a" 1}', '{"a":[1,2,]}', '{"a":[,1]}', '{"a":[1 2]}', '{"a":01}', '{"a":[01]}',
+            '{"a":tru}', '{"a":"unterminated}', '{"a":1}}', '{"a":1', '{"a":[1', '{"a":[1}',
+        )
+        for text in documents:
+            with self.subTest(text=text[:60]):
+                fast, slow = self.trees(text)
+                self.assertEqual(fast, slow)
+
+    def test_random_mutations_agree(self):
+        rng = random.Random(11)
+        base = ('[null,{"code":401,"indent":0,"parameters":["Hi \\"x\\"",1,[2,3]]},{"id":1,"a":"","b":[1,2,3],'
+                '"c":{"d":null,"e":[true,false]},"n":-1.5e3}]')
+        alphabet = list('{}[],:"\\ \n01-.eEtrufalsn') + ["\x01", "é"]
+        for _ in range(1500):
+            chars = list(base)
+            for _ in range(rng.choice([1, 2, 3])):
+                i = rng.randrange(len(chars))
+                action = rng.random()
+                if action < 0.35:
+                    del chars[i]
+                elif action < 0.7:
+                    chars.insert(i, rng.choice(alphabet))
+                else:
+                    chars[i] = rng.choice(alphabet)
+            fast, slow = self.trees("".join(chars))
+            self.assertEqual(fast, slow, "".join(chars))
+
+
 class IntegrityGateTests(unittest.TestCase):
     def test_accepts_whitespace_only_changes(self):
         verify_lossless('{"a": [1, 2]}', '{\n\t"a":[1,2]\n}')
@@ -431,6 +505,36 @@ class ConfigAndCliTests(unittest.TestCase):
         self.assertEqual(main([str(source), str(output), "--config", str(ini), "--no-tight", "--no-tab"]), 0)
 
         self.assertIn('"data": [0, 0]', output.read_text(encoding="utf-8"))
+
+    def test_ini_reader_handles_comments_case_and_other_sections(self):
+        path = self.write_ini(
+            "\ufeff; leading comment\n[other]\ntight = false\n\n[Format]\n# another comment\n"
+            "TIGHT = Off   # inline comment\nhug=yes;not a comment (no space before the semicolon)\nwrap = on\n"
+        )
+
+        # "hug=yes;not..." is not a valid boolean, so hug keeps its default; [other] is ignored
+        self.assertEqual(load_options(path), Options(tight=False, wrap=True))
+        self.assertIn("hug", self.log.read_text(encoding="utf-8"))
+
+    def test_cli_usage_errors_and_help(self):
+        for argv in ([], ["only-one.json"], ["a.json", "b.json", "c.json"], ["a.json", "b.json", "--nonsense"],
+                     ["a.json", "b.json", "--config"]):
+            with self.subTest(argv=argv):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(argv), 2)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["--help"]), 0)
+        self.assertIn("用法", out.getvalue())
+
+    def test_importing_the_script_stays_light(self):
+        # WinMerge starts a new Python process per file: heavy imports are paid on every comparison.
+        code = (
+            "import sys; sys.path.insert(0, %r); import RPGJsonBeautifier; "
+            "print(sorted(m for m in ('argparse', 'dataclasses', 'configparser', 'tempfile', 'pathlib') if m in sys.modules))"
+        ) % str(Path(__file__).resolve().parents[1] / "src")
+        result = subprocess.run([sys.executable, "-S", "-c", code], capture_output=True, text=True, check=True)
+
+        self.assertEqual(result.stdout.strip(), "[]")
 
     def test_cli_refuses_same_input_and_output_path(self):
         source_text = '{"message":"keep original"}'

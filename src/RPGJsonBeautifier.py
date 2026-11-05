@@ -9,27 +9,28 @@ merged closing brackets (``}]}``), "snug" openings and merged empty entries.
 Every layout switch can be changed in ``RPGJsonBeautifier.ini`` (next to this
 script) or on the command line.
 
-Safety guarantees (unchanged):
+Safety guarantees:
   * only whitespace outside JSON strings is regenerated; number spellings,
     string escapes, key order and duplicate keys are kept verbatim;
   * the result is verified against the input before it is written;
   * the input file is never modified.
 
+Speed notes (WinMerge starts this script once per compared file):
+  * only ``json``, ``os``, ``re``, ``sys`` and ``collections`` are imported at start-up
+    (argparse, dataclasses, pathlib, tempfile, configparser cost ~25 ms on their own);
+  * numeric arrays and "flat" objects (event commands, actors, items...) are parsed with a
+    single regular-expression match instead of one match per token;
+  * the integrity check uses str.replace and the C json scanner instead of four regex passes.
+
 Standard library only; Python 3.10+.
 """
 from __future__ import annotations
 
-import argparse
-import configparser
 import json
 import os
 import re
 import sys
-import tempfile
-import time
-from dataclasses import dataclass, fields
-from pathlib import Path
-from typing import Union
+from collections import namedtuple
 
 # --------------------------------------------------------------------------
 # Errors, options
@@ -40,17 +41,18 @@ class JsonFormatError(ValueError):
     pass
 
 
-@dataclass(frozen=True)
-class Options:
-    """Layout switches. Defaults match the HTML tool's defaults."""
-
-    hug: bool = True          # merge closers that directly follow another closer: }\n] -> }]
-    tight: bool = True        # no space after "," and ":"   ->  [0,0,0]  "k":v
-    wrap: bool = False        # wrap very long numeric arrays at WRAP_WIDTH columns
-    tab: bool = True          # indent with Tab instead of two spaces
-    snug: bool = True         # "{" joins its first entry; "[" joins a leading null; [[1,2]] and [true,false] stay on one line
-    merge_empty: bool = True  # consecutive empty-valued entries (and adjacent "" in arrays) share a line
-
+# Layout switches. Defaults match the HTML tool's defaults.
+#   hug          merge closers that directly follow another closer: }\n] -> }]
+#   tight        no space after "," and ":"   ->  [0,0,0]  "k":v
+#   wrap         wrap very long numeric arrays at WRAP_WIDTH columns
+#   tab          indent with Tab instead of two spaces
+#   snug         "{" joins its first entry; "[" joins a leading null; [[1,2]] and [true,false] stay on one line
+#   merge_empty  consecutive empty-valued entries (and adjacent "" in arrays) share a line
+Options = namedtuple(
+    "Options",
+    ("hug", "tight", "wrap", "tab", "snug", "merge_empty"),
+    defaults=(True, True, False, True, True, True),
+)
 
 # Plain look: two spaces, ", " and ": " and every optional layout feature off (the rules that have no switch still apply).
 LEGACY = Options(hug=False, tight=False, wrap=False, tab=False, snug=False, merge_empty=False)
@@ -58,6 +60,12 @@ LEGACY = Options(hug=False, tight=False, wrap=False, tab=False, snug=False, merg
 WRAP_WIDTH = 100      # numeric-array wrap column
 COMPACT_WIDTH = 100   # widest merged line of empty entries (a Tab counts as 2 columns)
 MAX_DEPTH = 200       # RPG Maker data is shallow; this only guards against pathological input
+
+
+def _decode(raw: str) -> str:
+    """Decoded value of a raw JSON string token (only needed for escaped strings and keys)."""
+    return json.loads(raw)
+
 
 # --------------------------------------------------------------------------
 # Lossless parser. Node = str (raw scalar token) | Array | Obj
@@ -67,10 +75,10 @@ MAX_DEPTH = 200       # RPG Maker data is shallow; this only guards against path
 class Array:
     __slots__ = ("items", "scalars", "numeric")
 
-    def __init__(self, items: list | None = None, scalars: bool = False, numeric: bool = False) -> None:
+    def __init__(self, items: list | None = None, scalars: bool | None = None, numeric: bool = False) -> None:
         self.items = [] if items is None else items
-        self.scalars = scalars    # every item is a scalar token (set by finish())
-        self.numeric = numeric    # non-empty and every item is a number or null (set by finish())
+        self.scalars = scalars    # every item is a scalar token; None until finish()
+        self.numeric = numeric    # non-empty and every item is a number or null
 
     def finish(self) -> None:
         scalars = numeric = True
@@ -85,27 +93,65 @@ class Array:
 
 
 class Obj:
-    __slots__ = ("entries",)
+    __slots__ = ("entries", "all_empty", "has_code", "flat", "all_scalar")
 
     def __init__(self) -> None:
         # A list of (raw key token, node): JSON duplicate keys and order must survive.
-        self.entries: list[tuple[str, "Node"]] = []
+        self.entries: list[tuple[str, Node]] = []
+        self.all_empty: bool | None = None    # None until finish()
+        self.has_code = False                 # has a "code" key (RPG Maker event command)
+        self.flat = True                      # every value is a scalar or an array of scalars
+        self.all_scalar = True                # every value is a scalar
+
+    def finish(self) -> None:
+        all_empty, has_code, flat, all_scalar = True, False, True, True
+        for k, v in self.entries:
+            t = type(v)
+            if t is str:
+                if v != "null" and v != '""':
+                    all_empty = False
+            else:
+                all_scalar = False
+                if t is Array:
+                    if v.items:
+                        all_empty = False
+                    if not v.scalars:
+                        flat = False
+                else:
+                    flat = False
+                    if v.entries:
+                        all_empty = False
+            if not has_code and (k == '"code"' or ("\\" in k and _decode(k) == "code")):
+                has_code = True
+        self.all_empty, self.has_code, self.flat, self.all_scalar = all_empty, has_code, flat, all_scalar
 
 
-Node = Union[str, Array, Obj]
+Node = str | Array | Obj
 
 _WS = r"[ \t\r\n]*"
 _STRING = r'"[^"\\\x00-\x1f]*(?:\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4})[^"\\\x00-\x1f]*)*"'
 _NUMBER = r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
 _LITERAL = r"true|false|null"
 _PUNCT = r"[\[\]{},:]"
+_SCALAR = rf"(?:{_STRING}|{_NUMBER}|{_LITERAL})"
 
 # group 1 string, 2 number, 3 literal, 4 punctuation (leading whitespace is skipped)
 _TOKEN = re.compile(rf"{_WS}(?:({_STRING})|({_NUMBER})|({_LITERAL})|({_PUNCT}))")
-_TOKEN_STREAM = re.compile(rf"{_WS}(?:{_STRING}|{_NUMBER}|{_LITERAL}|{_PUNCT})")
+
+# Fast paths. "Flat" = scalars and arrays of at most 64 scalars, objects of at most 256 entries
+# (bigger ones take the token loop: a regex repeat keeps backtracking state per iteration, i.e. memory). In each loop the separator is
+# "a comma followed by the start of another item" or "directly the closer", which rejects trailing
+# commas and missing commas without repeating the item pattern.
 _FLAT_ITEM = re.compile(rf"{_WS}(?:{_NUMBER}|null){_WS}")
 _NOT_FLAT = re.compile(r'[\[{"]')
-_WS_RUN = re.compile(r"[ \t\r\n]+")
+_FLAT_ARRAY = rf'\[{_WS}(?:{_SCALAR}{_WS}(?:,{_WS}(?=["\-0-9tfn])|(?=\]))){{0,64}}\]'
+_FLAT_VALUE = rf"(?:{_SCALAR}|{_FLAT_ARRAY})"
+_FLAT_OBJECT = re.compile(
+    rf'\{{{_WS}(?:{_STRING}{_WS}:{_WS}{_FLAT_VALUE}{_WS}(?:,{_WS}(?=")|(?=\}}))){{0,256}}\}}'
+)
+_ENTRY = re.compile(rf"({_STRING}){_WS}:{_WS}({_FLAT_VALUE})")
+_SCALAR_TOKEN = re.compile(_SCALAR)
+
 _TRAILING_WS = re.compile(r"[ \t\r\n]*\Z")
 _HEX4 = re.compile(r"[0-9A-Fa-f]{4}\Z")
 
@@ -163,6 +209,25 @@ def _flat_numbers(src: str, pos: int) -> tuple[list[str], int] | None:
     return [p.strip(" \t\r\n") for p in parts], end + 1
 
 
+def _flat_object(src: str, start: int) -> tuple[Obj, int] | None:
+    """Fast path for an object whose values are scalars or short scalar arrays, e.g. an event
+    command ``{"code":401,"indent":0,"parameters":["text"]}``: one match instead of ~17 tokens."""
+    m = _FLAT_OBJECT.match(src, start)
+    if m is None:
+        return None
+    obj = Obj()
+    entries = obj.entries
+    for key, raw in _ENTRY.findall(src, start, m.end()):      # pos/endpos: no substring copy
+        if raw[0] == "[":
+            arr = Array(_SCALAR_TOKEN.findall(raw, 1, len(raw) - 1))
+            arr.finish()
+            entries.append((key, arr))
+        else:
+            entries.append((key, raw))
+    obj.finish()
+    return obj, m.end()
+
+
 def parse_json(src: str) -> Node:
     """Parse JSON into a tree of raw tokens. Iterative, so nesting never hits the recursion limit."""
     if not src.strip(" \t\r\n"):
@@ -180,60 +245,64 @@ def parse_json(src: str) -> Node:
             raise _lex_error(src, pos)
         kind = m.lastindex
         tok = m.group(kind)
-        start = m.start(kind)
         pos = m.end()
 
-        if state == _COLON:
-            if kind != 4 or tok != ":":
-                raise _error(src, start, "物件鍵後面預期冒號")
-            state = _VALUE
-            continue
-
-        if state == _KEY or state == _KEY_OR_END:
-            if kind == 1:
-                keys[-1] = tok
-                state = _COLON
+        if state == _COMMA_OR_END:
+            top = stack[-1]
+            is_array = type(top) is Array
+            if kind != 4 or (tok != "," and tok != ("]" if is_array else "}")):
+                raise _error(src, m.start(kind), "陣列項目之間預期逗號" if is_array else "物件項目之間預期逗號")
+            if tok == ",":
+                state = _VALUE if is_array else _KEY
                 continue
-            if state == _KEY_OR_END and tok == "}":
-                value: Node = stack.pop()                 # empty object
-                keys.pop()
-            else:
-                raise _error(src, start, "JSON 物件不允許尾隨逗號" if tok == "}" else "物件中預期字串鍵名")
+            value: Node = stack.pop()
+            keys.pop()
 
         elif state == _VALUE or state == _VALUE_OR_END:
             if kind != 4:
                 value = tok                               # string / number / literal
             elif tok == "[" or tok == "{":
-                flat = _flat_numbers(src, pos) if tok == "[" else None
+                flat = _flat_numbers(src, pos) if tok == "[" else _flat_object(src, pos - 1)
                 if flat is None:
                     if len(stack) >= MAX_DEPTH:
-                        raise _error(src, start, f"JSON 巢狀超過 {MAX_DEPTH} 層")
+                        raise _error(src, m.start(kind), f"JSON 巢狀超過 {MAX_DEPTH} 層")
                     stack.append(Array() if tok == "[" else Obj())
                     keys.append("")
                     state = _VALUE_OR_END if tok == "[" else _KEY_OR_END
                     continue
-                value = Array(flat[0], True, True)
-                pos = flat[1]
+                if tok == "[":
+                    value, pos = Array(flat[0], True, True), flat[1]
+                else:
+                    value, pos = flat
             elif tok == "]" and state == _VALUE_OR_END:
                 value = stack.pop()                       # empty array
                 keys.pop()
             else:
-                raise _error(src, start, "JSON 陣列不允許尾隨逗號" if tok == "]" else "預期 JSON 值")
+                raise _error(src, m.start(kind), "JSON 陣列不允許尾隨逗號" if tok == "]" else "預期 JSON 值")
 
-        else:  # _COMMA_OR_END
-            top = stack[-1]
-            is_array = type(top) is Array
-            if kind == 4 and tok == ",":
-                state = _VALUE if is_array else _KEY
+        elif state == _COLON:
+            if kind != 4 or tok != ":":
+                raise _error(src, m.start(kind), "物件鍵後面預期冒號")
+            state = _VALUE
+            continue
+
+        else:  # _KEY / _KEY_OR_END
+            if kind == 1:
+                keys[-1] = tok
+                state = _COLON
                 continue
-            if kind == 4 and tok == ("]" if is_array else "}"):
-                value = stack.pop()
+            if state == _KEY_OR_END and tok == "}":
+                value = stack.pop()                       # empty object
                 keys.pop()
             else:
-                raise _error(src, start, "陣列項目之間預期逗號" if is_array else "物件項目之間預期逗號")
+                raise _error(src, m.start(kind), "JSON 物件不允許尾隨逗號" if tok == "}" else "物件中預期字串鍵名")
 
-        # A complete value: classify finished arrays, then attach it to its parent.
-        if type(value) is Array and not value.scalars:
+        # A complete value: classify finished containers, then attach it to its parent.
+        t = type(value)
+        if t is Array:
+            if value.scalars is None:
+                value.finish()
+        elif t is Obj and value.all_empty is None:
             value.finish()
         if not stack:
             break
@@ -258,28 +327,11 @@ def parse_json(src: str) -> Node:
 _SHORT_ASCII = re.compile(r"[A-Za-z0-9_]{1,9}\Z")
 
 
-def _is_empty(node: Node) -> bool:
-    # 0 and false are valid RPG Maker values, not empty values.
-    if type(node) is str:
-        return node == "null" or node == '""'
-    if type(node) is Array:
-        return not node.items
-    return not node.entries
-
-
 def _is_short_ascii(node: Node) -> bool:
     if type(node) is not str or node[0] != '"':
         return False
-    text = node[1:-1] if "\\" not in node else json.loads(node)
+    text = node[1:-1] if "\\" not in node else _decode(node)
     return _SHORT_ASCII.match(text) is not None
-
-
-def _is_code_key(raw_key: str) -> bool:
-    return raw_key == '"code"' or ("\\" in raw_key and json.loads(raw_key) == "code")
-
-
-def _is_scalar_or_scalar_array(node: Node) -> bool:
-    return type(node) is str or (type(node) is Array and node.scalars)
 
 
 def _fits(text: str, pad_w: int) -> bool:
@@ -406,13 +458,14 @@ class _Formatter:
         entries = node.entries
         if not entries:
             return "{}"
-        if all(_is_empty(v) for _, v in entries):
+        # Flags were computed once by Obj.finish() while parsing.
+        if node.all_empty:
             return self._inline(node)
         # RPG MV/MZ command objects: has a "code" key and every value is a scalar / scalar array.
-        if any(_is_code_key(k) for k, _ in entries) and all(_is_scalar_or_scalar_array(v) for _, v in entries):
+        if node.has_code and node.flat:
             return self._inline(node)
         # Short objects whose direct values are all scalars stay on one line.
-        if all(type(v) is str for _, v in entries):
+        if node.all_scalar:
             one = self._inline(node)
             if _fits(one, indent * 2):
                 return one
@@ -520,28 +573,32 @@ def _snug_openings(lines: list[str]) -> list[str]:
 # Integrity gate
 # --------------------------------------------------------------------------
 
-_STRIP = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[^ \t\r\n"]+')
+_STRINGS = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"')
 
 
-def strip_json_whitespace(source: str) -> str:
-    """Remove only insignificant JSON whitespace (outside strings)."""
-    return "".join(_STRIP.findall(source))
+def _drop_ws(text: str) -> str:
+    # Four str.replace calls run at memory speed (a regex pass is ~10x slower).
+    return text.replace(" ", "").replace("\t", "").replace("\r", "").replace("\n", "")
 
 
 def verify_lossless(source: str, output: str) -> None:
     """Raise unless `output` is `source` with only whitespace between tokens changed.
 
-    1. identical once insignificant whitespace is removed;
-    2. `output` is a clean stream of tokens separated by whitespace only
-       (nothing was inserted inside a number, literal or between token characters);
-    3. both contain the same number of tokens (nothing was split or glued).
-    Each step is a C-speed regex pass, so the gate stays cheap on multi-MB files.
+    1. identical once all JSON whitespace is removed (same characters, same order, so no value,
+       number spelling, escape, key or bracket was touched);
+    2. `output` is valid JSON (the C scanner; nothing was inserted inside a number or literal);
+    3. every string token is identical including the whitespace inside it.
+    Together they imply the token sequences are equal. `source` was already validated by parse_json.
     """
-    if strip_json_whitespace(source) != strip_json_whitespace(output):
+    if _drop_ws(source) != _drop_ws(output):
         raise JsonFormatError("完整性檢查失敗：輸出內容不只是排版空白差異")
-    rest, out_tokens = _TOKEN_STREAM.subn("", output)
-    if rest.strip(" \t\r\n") or out_tokens != _TOKEN_STREAM.subn("", source)[1]:
-        raise JsonFormatError("完整性檢查失敗：輸出的 JSON 符號數量或結構與原文不同")
+    try:
+        # len() as number hook: validity only, skips int()/float() conversion of every number
+        json.loads(output, parse_int=len, parse_float=len)
+    except (ValueError, RecursionError) as exc:
+        raise JsonFormatError("完整性檢查失敗：輸出不是有效的 JSON") from exc
+    if _STRINGS.findall(source) != _STRINGS.findall(output):
+        raise JsonFormatError("完整性檢查失敗：字串內容（含內部空白）與原文不同")
 
 
 # --------------------------------------------------------------------------
@@ -559,8 +616,9 @@ def beautify_text(source: str, options: Options | None = None) -> str:
     return formatted + "\n"
 
 
-def read_text(path: Path) -> str:
-    data = path.read_bytes()
+def read_text(path: str | os.PathLike) -> str:
+    with open(path, "rb") as fh:
+        data = fh.read()
     # JSON is normally UTF-8; support UTF-8 BOM and UTF-16 BOM as well.
     if data.startswith(b"\xef\xbb\xbf"):
         return data.decode("utf-8-sig")
@@ -572,11 +630,15 @@ def read_text(path: Path) -> str:
         raise JsonFormatError(f"無法以 UTF-8 讀取檔案：{exc}") from exc
 
 
-def _log_path() -> Path | None:
+def _log_path() -> str | None:
     override = os.environ.get("RPGJSONBEAUTIFIER_LOG")    # empty string disables logging
     if override is not None:
-        return Path(override) if override else None
-    return Path(tempfile.gettempdir()) / "RPGJsonBeautifier.log"
+        return override or None
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        folder = os.environ.get(name)
+        if folder:
+            return os.path.join(folder, "RPGJsonBeautifier.log")
+    return os.path.join("C:\\Windows\\Temp" if os.name == "nt" else "/tmp", "RPGJsonBeautifier.log")
 
 
 def log(message: str) -> None:
@@ -585,65 +647,120 @@ def log(message: str) -> None:
     if path is None:
         return
     try:
-        if path.exists() and path.stat().st_size > 256 * 1024:
-            path.unlink()
-        with path.open("a", encoding="utf-8") as fh:
+        import time
+        if os.path.exists(path) and os.path.getsize(path) > 256 * 1024:
+            os.remove(path)
+        with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
     except OSError:
         pass
 
 
-_OPTION_NAMES = tuple(f.name for f in fields(Options))
+_BOOLEANS = {"1": True, "yes": True, "true": True, "on": True, "0": False, "no": False, "false": False, "off": False}
 
 
-def load_options(config_path: Path | None = None) -> Options:
+def _read_ini_section(path: str, section: str) -> dict[str, str]:
+    """Minimal INI reader: `[section]`, `key = value`, full-line and inline (" ;" / " #") comments."""
+    with open(path, "rb") as fh:
+        text = fh.read().decode("utf-8-sig")
+    values: dict[str, str] = {}
+    current = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] in ";#":
+            continue
+        if line[0] == "[" and line[-1] == "]":
+            current = line[1:-1].strip().lower()
+            continue
+        key, sep, value = line.partition("=")
+        if current != section or not sep:
+            continue
+        for i in range(1, len(value)):
+            if value[i] in ";#" and value[i - 1].isspace():
+                value = value[:i]
+                break
+        values[key.strip().lower()] = value.strip()
+    return values
+
+
+def load_options(config_path: str | os.PathLike | None = None) -> Options:
     """Defaults, overridden by the [format] section of the .ini file next to this script."""
-    path = config_path or Path(__file__).resolve().with_suffix(".ini")
-    values: dict[str, bool] = {}
-    if path.is_file():
-        parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    path = os.fspath(config_path) if config_path else os.path.splitext(os.path.realpath(__file__))[0] + ".ini"
+    chosen: dict[str, bool] = {}
+    if os.path.isfile(path):
+        name = os.path.basename(path)
         try:
-            parser.read(path, encoding="utf-8-sig")
-            for name in _OPTION_NAMES:
-                if parser.has_option("format", name):
-                    try:
-                        values[name] = parser.getboolean("format", name)
-                    except ValueError:
-                        log(f"{path.name}: [format] {name} 的值不是 true/false，已使用預設值")
-        except (configparser.Error, OSError, UnicodeDecodeError) as exc:
-            log(f"{path.name}: 無法讀取設定檔，已使用預設值（{exc}）")
-    return Options(**values)
+            raw = _read_ini_section(path, "format")
+        except (OSError, UnicodeDecodeError) as exc:
+            log(f"{name}: 無法讀取設定檔，已使用預設值（{exc}）")
+            raw = {}
+        for key in Options._fields:
+            if key in raw:
+                flag = _BOOLEANS.get(raw[key].lower())
+                if flag is None:
+                    log(f"{name}: [format] {key} 的值不是 true/false，已使用預設值")
+                else:
+                    chosen[key] = flag
+    return Options(**chosen)
+
+
+_USAGE = ("用法: RPGJsonBeautifier.py 來源.json 輸出.json [--config 設定檔] "
+          + " ".join(f"[--[no-]{n.replace('_', '-')}]" for n in Options._fields))
+
+
+def _parse_args(argv: list[str]) -> tuple[str, str, str | None, dict[str, bool]]:
+    paths: list[str] = []
+    overrides: dict[str, bool] = {}
+    config: str | None = None
+    it = iter(argv)
+    for arg in it:
+        if arg == "--config" or arg.startswith("--config="):
+            config = arg[9:] if arg.startswith("--config=") else next(it, None)
+            if not config:
+                raise ValueError("--config 需要設定檔路徑")
+        elif arg.startswith("--"):
+            name, value = (arg[5:], False) if arg.startswith("--no-") else (arg[2:], True)
+            name = name.replace("-", "_")
+            if name not in Options._fields:
+                raise ValueError(f"不認得的選項 {arg}")
+            overrides[name] = value
+        else:
+            paths.append(arg)
+    if len(paths) != 2:
+        raise ValueError("需要兩個路徑：來源與輸出")
+    return paths[0], paths[1], config, overrides
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="RPG MV/MZ JSON lossless formatter")
-    parser.add_argument("input", help="來源 JSON 檔案")
-    parser.add_argument("output", help="輸出美化檔案（請勿與來源路徑相同）")
-    parser.add_argument("--config", type=Path, help="設定檔路徑（預設：與本程式同名的 .ini）")
-    for name in _OPTION_NAMES:
-        parser.add_argument(f"--{name.replace('_', '-')}", dest=name, action=argparse.BooleanOptionalAction,
-                            default=None, help=f"覆寫設定檔的 {name}")
-    args = parser.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    if "-h" in argv or "--help" in argv:
+        print(_USAGE)
+        return 0
+    try:
+        input_path, output_path, config, overrides = _parse_args(argv)
+    except ValueError as exc:
+        print(f"RPGJsonBeautifier: {exc}\n{_USAGE}", file=sys.stderr)
+        return 2
 
-    src = Path(args.input).resolve()
-    dst = Path(args.output).resolve()
+    src = os.path.normcase(os.path.realpath(input_path))
+    dst = os.path.normcase(os.path.realpath(output_path))
     if src == dst:
         print("錯誤：來源與輸出路徑相同，為避免覆寫原始檔案已取消。", file=sys.stderr)
         return 2
 
     try:
-        options = load_options(args.config)
-        overrides = {n: getattr(args, n) for n in _OPTION_NAMES if getattr(args, n) is not None}
-        if overrides:
-            options = Options(**{**{n: getattr(options, n) for n in _OPTION_NAMES}, **overrides})
-        formatted = beautify_text(read_text(src), options)
-        dst.parent.mkdir(parents=True, exist_ok=True)
+        options = load_options(config)._replace(**overrides)
+        formatted = beautify_text(read_text(input_path), options)
+        folder = os.path.dirname(dst)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
         # UTF-8 output without BOM and with LF newlines, for predictable WinMerge display.
-        dst.write_text(formatted, encoding="utf-8", newline="")
+        with open(output_path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(formatted)
         return 0
     except (OSError, JsonFormatError) as exc:
         print(f"RPGJsonBeautifier: {exc}", file=sys.stderr)
-        log(f"{src}: {exc}")
+        log(f"{input_path}: {exc}")
         return 1
 
 
